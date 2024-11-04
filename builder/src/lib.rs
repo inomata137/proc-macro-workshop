@@ -1,4 +1,5 @@
 use proc_macro::TokenStream;
+use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::*;
 
@@ -29,41 +30,18 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
     };
 
-    let builder_defaults = fields.iter().map(|field| {
-        let field_name = &field.ident;
-        quote! {
-            #field_name: None,
-        }
-    });
+    let mut builder_defaults = Vec::with_capacity(fields.len());
+    let mut builder_field_definitions = Vec::with_capacity(fields.len());
+    let mut builder_setters = Vec::with_capacity(fields.len());
+    let mut build_attrs = Vec::with_capacity(fields.len());
 
-    let builder_field_definitions = fields.iter().map(|field| {
-        let field_name = &field.ident;
-        let ty = &field.ty;
-        quote! {
-            #field_name: Option<#ty>,
-        }
-    });
-
-    let builder_setters = fields.iter().map(|field| {
-        let field_name = &field.ident;
-        let ty = &field.ty;
-        quote! {
-            #vis fn #field_name(&mut self, #field_name: #ty) -> &mut Self {
-                self.#field_name = Some(#field_name);
-                self
-            }
-        }
-    });
-
-    let build_attrs = fields.iter().map(|field| {
-        let field_ident = field.ident.clone().unwrap();
-        let message = format!("field {} isn't set", field_ident);
-        quote! {
-            #field_ident: self.#field_ident
-                .clone()
-                .ok_or_else(|| -> Box<dyn std::error::Error> { #message.into() })?,
-        }
-    });
+    for field in &fields {
+        let ft = field_type(field);
+        builder_defaults.push(builder_default(field));
+        builder_field_definitions.push(builder_field_definition(field, &ft));
+        builder_setters.push(builder_setter(field, &vis, &ft));
+        build_attrs.push(build_attr(field, &ft));
+    }
 
     let expanded = quote! {
         impl #generics #ident #generics {
@@ -89,4 +67,81 @@ pub fn derive(input: TokenStream) -> TokenStream {
     };
 
     TokenStream::from(expanded)
+}
+
+fn builder_default(Field { ident, .. }: &Field) -> TokenStream2 {
+    quote! {
+        #ident: None,
+    }
+}
+
+fn builder_field_definition(Field { ident, .. }: &Field, field_type: &FieldType) -> TokenStream2 {
+    let ty = match field_type {
+        &FieldType::Optional(ty) => ty,
+        &FieldType::Required(ty) => ty,
+    };
+    quote! {
+        #ident: Option<#ty>,
+    }
+}
+
+fn builder_setter(
+    Field { ident, .. }: &Field,
+    vis: &Visibility,
+    field_type: &FieldType,
+) -> TokenStream2 {
+    let ty = match field_type {
+        &FieldType::Optional(ty) => ty,
+        &FieldType::Required(ty) => ty,
+    };
+    quote! {
+        #vis fn #ident(&mut self, #ident: #ty) -> &mut Self {
+            self.#ident = Some(#ident);
+            self
+        }
+    }
+}
+
+fn build_attr(Field { ident, .. }: &Field, field_type: &FieldType) -> TokenStream2 {
+    match field_type {
+        FieldType::Optional(_) => quote! {
+            #ident: self.#ident.clone(),
+        },
+        FieldType::Required(_) => {
+            let ident = ident.clone().unwrap();
+            let message = format!("field {} isn't set", ident);
+            quote! {
+                #ident: self.#ident
+                    .clone()
+                    .ok_or_else(|| -> Box<dyn std::error::Error> { #message.into() })?,
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum FieldType<'a> {
+    Optional(&'a Type),
+    Required(&'a Type),
+}
+
+fn field_type(Field { ty, .. }: &Field) -> FieldType {
+    if let Type::Path(TypePath {
+        path: Path { segments, .. },
+        ..
+    }) = ty
+    {
+        if let Some(PathSegment {
+            ident,
+            arguments: PathArguments::AngleBracketed(AngleBracketedGenericArguments { args, .. }),
+        }) = segments.first()
+        {
+            if ident == "Option" {
+                if let Some(GenericArgument::Type(ty)) = args.first() {
+                    return FieldType::Optional(ty);
+                }
+            }
+        }
+    }
+    return FieldType::Required(ty);
 }
