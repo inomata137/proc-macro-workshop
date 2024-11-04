@@ -3,7 +3,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::*;
 
-#[proc_macro_derive(Builder)]
+#[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
@@ -36,11 +36,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let mut build_attrs = Vec::with_capacity(fields.len());
 
     for field in &fields {
-        let ft = field_type(field);
-        builder_defaults.push(builder_default(field));
-        builder_field_definitions.push(builder_field_definition(field, &ft));
-        builder_setters.push(builder_setter(field, &vis, &ft));
-        build_attrs.push(build_attr(field, &ft));
+        match field_type(field) {
+            Ok(field_type) => {
+                builder_defaults.push(builder_default(field));
+                builder_field_definitions.push(builder_field_definition(field, &field_type));
+                builder_setters.push(builder_setter(field, &vis, &field_type));
+                build_attrs.push(build_attr(field, &field_type));
+            }
+            Err(err) => return err.to_compile_error().into(),
+        }
     }
 
     let expanded = quote! {
@@ -75,10 +79,14 @@ fn builder_default(Field { ident, .. }: &Field) -> TokenStream2 {
     }
 }
 
-fn builder_field_definition(Field { ident, .. }: &Field, field_type: &FieldType) -> TokenStream2 {
+fn builder_field_definition(
+    Field { ident, ty, .. }: &Field,
+    field_type: &FieldType,
+) -> TokenStream2 {
     let ty = match field_type {
         &FieldType::Optional(ty) => ty,
         &FieldType::Required(ty) => ty,
+        &FieldType::Repeated(_, _) => ty,
     };
     quote! {
         #ident: Option<#ty>,
@@ -90,15 +98,19 @@ fn builder_setter(
     vis: &Visibility,
     field_type: &FieldType,
 ) -> TokenStream2 {
-    let ty = match field_type {
-        &FieldType::Optional(ty) => ty,
-        &FieldType::Required(ty) => ty,
-    };
-    quote! {
-        #vis fn #ident(&mut self, #ident: #ty) -> &mut Self {
-            self.#ident = Some(#ident);
-            self
-        }
+    match field_type {
+        FieldType::Optional(ty) | FieldType::Required(ty) => quote! {
+            #vis fn #ident(&mut self, #ident: #ty) -> &mut Self {
+                self.#ident = Some(#ident);
+                self
+            }
+        },
+        FieldType::Repeated(ty, each) => quote! {
+            #vis fn #each(&mut self, #each: #ty) -> &mut Self {
+                self.#ident.get_or_insert_with(Vec::new).push(#each);
+                self
+            }
+        },
     }
 }
 
@@ -116,6 +128,9 @@ fn build_attr(Field { ident, .. }: &Field, field_type: &FieldType) -> TokenStrea
                     .ok_or_else(|| -> Box<dyn std::error::Error> { #message.into() })?,
             }
         }
+        FieldType::Repeated(_, _) => quote! {
+            #ident: self.#ident.clone().unwrap_or_default(),
+        },
     }
 }
 
@@ -123,9 +138,10 @@ fn build_attr(Field { ident, .. }: &Field, field_type: &FieldType) -> TokenStrea
 enum FieldType<'a> {
     Optional(&'a Type),
     Required(&'a Type),
+    Repeated(&'a Type, Ident),
 }
 
-fn field_type(Field { ty, .. }: &Field) -> FieldType {
+fn field_type<'a>(Field { ty, attrs, .. }: &'a Field) -> Result<FieldType<'a>> {
     if let Type::Path(TypePath {
         path: Path { segments, .. },
         ..
@@ -138,10 +154,43 @@ fn field_type(Field { ty, .. }: &Field) -> FieldType {
         {
             if ident == "Option" {
                 if let Some(GenericArgument::Type(ty)) = args.first() {
-                    return FieldType::Optional(ty);
+                    return Ok(FieldType::Optional(ty));
+                }
+            } else if ident == "Vec" {
+                if let Some(each) = each_attr(&attrs) {
+                    if let Some(GenericArgument::Type(ty)) = args.first() {
+                        return Ok(FieldType::Repeated(ty, each?));
+                    }
                 }
             }
         }
     }
-    return FieldType::Required(ty);
+    return Ok(FieldType::Required(ty));
+}
+
+fn each_attr(attrs: &Vec<Attribute>) -> Option<Result<Ident>> {
+    let mut each: Option<Result<Ident>> = None;
+
+    for attr in attrs {
+        if !attr.path().is_ident("builder") {
+            continue;
+        }
+        if let Meta::List(meta_list) = &attr.meta {
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("each") {
+                    let value = meta.value()?;
+                    let s: LitStr = value.parse()?;
+                    each = Some(Ok(format_ident!("{}", s.value())));
+                } else {
+                    each = Some(Err(Error::new_spanned(
+                        meta_list,
+                        "expected `builder(each = \"...\")`",
+                    )));
+                }
+                Ok(())
+            });
+        }
+    }
+
+    each
 }
