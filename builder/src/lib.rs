@@ -55,6 +55,16 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
     });
 
+    let build_attrs = fields.iter().map(|field| {
+        let field_ident = field.ident.clone().unwrap();
+        let message = format!("field {} isn't set", field_ident);
+        quote! {
+            #field_ident: self.#field_ident
+                .clone()
+                .ok_or_else(|| -> Box<dyn std::error::Error> { #message.into() })?,
+        }
+    });
+
     let expanded = quote! {
         impl #generics #ident #generics {
             #vis fn builder() -> #builder_ident #generics {
@@ -70,6 +80,11 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         impl #generics #builder_ident #generics {
             #(#builder_setters)*
+            #vis fn build(&mut self) -> Result<#ident #generics, Box<dyn std::error::Error>> {
+                Ok(#ident {
+                    #(#build_attrs)*
+                })
+            }
         }
     };
 
