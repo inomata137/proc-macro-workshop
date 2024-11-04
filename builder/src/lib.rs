@@ -62,8 +62,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         impl #generics #builder_ident #generics {
             #(#builder_setters)*
-            #vis fn build(&mut self) -> Result<#ident #generics, Box<dyn std::error::Error>> {
-                Ok(#ident {
+            #vis fn build(&mut self) -> std::result::Result<#ident #generics, std::boxed::Box<dyn std::error::Error>> {
+                std::result::Result::Ok(#ident {
                     #(#build_attrs)*
                 })
             }
@@ -75,7 +75,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
 fn builder_default(Field { ident, .. }: &Field) -> TokenStream2 {
     quote! {
-        #ident: None,
+        #ident: std::option::Option::None,
     }
 }
 
@@ -89,7 +89,7 @@ fn builder_field_definition(
         &FieldType::Repeated(_, _) => ty,
     };
     quote! {
-        #ident: Option<#ty>,
+        #ident: std::option::Option<#ty>,
     }
 }
 
@@ -101,13 +101,13 @@ fn builder_setter(
     match field_type {
         FieldType::Optional(ty) | FieldType::Required(ty) => quote! {
             #vis fn #ident(&mut self, #ident: #ty) -> &mut Self {
-                self.#ident = Some(#ident);
+                self.#ident = std::option::Option::Some(#ident);
                 self
             }
         },
         FieldType::Repeated(ty, each) => quote! {
             #vis fn #each(&mut self, #each: #ty) -> &mut Self {
-                self.#ident.get_or_insert_with(Vec::new).push(#each);
+                self.#ident.get_or_insert_with(std::vec::Vec::new).push(#each);
                 self
             }
         },
@@ -125,7 +125,7 @@ fn build_attr(Field { ident, .. }: &Field, field_type: &FieldType) -> TokenStrea
             quote! {
                 #ident: self.#ident
                     .clone()
-                    .ok_or_else(|| -> Box<dyn std::error::Error> { #message.into() })?,
+                    .ok_or_else(|| -> std::boxed::Box<dyn std::error::Error> { #message.into() })?,
             }
         }
         FieldType::Repeated(_, _) => quote! {
